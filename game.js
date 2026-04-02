@@ -1,5 +1,6 @@
 const socket = io();
 const otherPlayers = {};
+const cannonballs = [];
 
 socket.on("currentPlayers", (players) => {
   Object.keys(players).forEach(id => {
@@ -10,11 +11,20 @@ socket.on("currentPlayers", (players) => {
 socket.on("newPlayer", (data) => { otherPlayers[data.id] = data; });
 socket.on("playerMoved", (data) => { otherPlayers[data.id] = data; });
 socket.on("playerLeft", (id) => { delete otherPlayers[id]; });
+socket.on("cannonball", (ball) => { cannonballs.push(ball); });
+socket.on("playerHit", (data) => {
+  if (data.id === socket.id) { ship.health = data.health; showMessage("You got hit! Health: " + ship.health); }
+  else if (otherPlayers[data.id]) otherPlayers[data.id].health = data.health;
+});
+socket.on("playerRespawn", (data) => {
+  if (data.id === socket.id) { ship.x = data.x; ship.y = data.y; ship.health = 100; showMessage("You sank! Respawning..."); }
+  else if (otherPlayers[data.id]) { otherPlayers[data.id].x = data.x; otherPlayers[data.id].y = data.y; otherPlayers[data.id].health = 100; }
+});
 
 const canvas = document.getElementById("gameCanvas");
 const ctx = canvas.getContext("2d");
 
-const ship = { x: 400, y: 250, speed: 3, angle: 0, gold: 200, cargo: [], name: "Blackbeard", clan: "" };
+const ship = { x: 400, y: 250, speed: 3, angle: 0, gold: 200, cargo: [], name: "Blackbeard", clan: "", health: 100 };
 
 const islands = [
   { x: 150, y: 100, r: 50, name: "Tortuga", color: "#F5C842", goods: { Rum: 20, Spices: 80, Silk: 150 } },
@@ -29,6 +39,28 @@ document.addEventListener("keydown", e => {
   if (e.key === "Escape") tradeMenu = null;
 });
 document.addEventListener("keyup", e => keys[e.key] = false);
+
+canvas.addEventListener("click", e => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = (e.clientX - rect.left) * (800/rect.width);
+  const my = (e.clientY - rect.top) * (500/rect.height);
+
+  if (mx > 10 && mx < 120 && my > 54 && my < 78) { showClanInput = true; clanInput = ship.clan; return; }
+  if (tradeMenu) {
+    Object.keys(tradeMenu.goods).forEach((item, i) => {
+      const by = 175 + i*60;
+      if (mx > 220 && mx < 310 && my > by+28 && my < by+56) buyItem(tradeMenu, item);
+      if (mx > 320 && mx < 410 && my > by+28 && my < by+56) sellItem(tradeMenu, item);
+    });
+    return;
+  }
+
+  // Shoot cannonball toward click
+  const angle = Math.atan2(my - ship.y, mx - ship.x);
+  const ball = { id: Date.now(), ownerId: socket.id, x: ship.x, y: ship.y, angle, speed: 6 };
+  cannonballs.push(ball);
+  socket.emit("shoot", ball);
+});
 
 let waves = [];
 for(let i = 0; i < 40; i++) {
@@ -62,7 +94,7 @@ function sellItem(island, item) {
   showMessage("Sold " + item + " for " + sellPrice + "g! Profit: " + (sellPrice - inCargo.boughtAt) + "g");
 }
 
-function showMessage(msg) { message = msg; messageTimer = 120; }
+function showMessage(msg) { message = msg; messageTimer = 180; }
 
 document.addEventListener("keydown", e => {
   if (showClanInput) {
@@ -70,19 +102,6 @@ document.addEventListener("keydown", e => {
     else if (e.key === "Backspace") clanInput = clanInput.slice(0,-1);
     else if (e.key.length === 1 && clanInput.length < 12) clanInput += e.key;
   }
-});
-
-canvas.addEventListener("click", e => {
-  const rect = canvas.getBoundingClientRect();
-  const mx = (e.clientX - rect.left) * (800/rect.width);
-  const my = (e.clientY - rect.top) * (500/rect.height);
-  if (mx > 10 && mx < 120 && my > 54 && my < 78) { showClanInput = true; clanInput = ship.clan; return; }
-  if (!tradeMenu) return;
-  Object.keys(tradeMenu.goods).forEach((item, i) => {
-    const by = 175 + i*60;
-    if (mx > 220 && mx < 310 && my > by+28 && my < by+56) buyItem(tradeMenu, item);
-    if (mx > 320 && mx < 410 && my > by+28 && my < by+56) sellItem(tradeMenu, item);
-  });
 });
 
 function update() {
@@ -95,6 +114,16 @@ function update() {
     ship.y = Math.max(20, Math.min(480, ship.y));
   }
   if (messageTimer > 0) messageTimer--;
+
+  // Update cannonballs
+  for (let i = cannonballs.length - 1; i >= 0; i--) {
+    cannonballs[i].x += Math.cos(cannonballs[i].angle) * cannonballs[i].speed;
+    cannonballs[i].y += Math.sin(cannonballs[i].angle) * cannonballs[i].speed;
+    if (cannonballs[i].x < 0 || cannonballs[i].x > 800 || cannonballs[i].y < 0 || cannonballs[i].y > 500) {
+      cannonballs.splice(i, 1);
+    }
+  }
+
   socket.emit("move", { x: ship.x, y: ship.y, angle: ship.angle });
 }
 
@@ -125,16 +154,15 @@ function drawIslands() {
   });
 }
 
-function drawShip() {
-  ctx.save(); ctx.translate(ship.x, ship.y); ctx.rotate(ship.angle);
-  ctx.fillStyle = "#8B4513"; ctx.beginPath(); ctx.moveTo(22,0); ctx.lineTo(-15,-10); ctx.lineTo(-20,0); ctx.lineTo(-15,10); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = "#A0522D"; ctx.beginPath(); ctx.ellipse(0,0,14,8,0,0,Math.PI*2); ctx.fill();
-  ctx.strokeStyle = "#5C3010"; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(0,-8); ctx.lineTo(0,8); ctx.stroke();
-  ctx.fillStyle = "#F5F0E0"; ctx.beginPath(); ctx.moveTo(0,-8); ctx.quadraticCurveTo(14+Math.sin(t)*2,0,0,8); ctx.quadraticCurveTo(-3,0,0,-8); ctx.fill();
-  ctx.rotate(-ship.angle); ctx.fillStyle = "#fff"; ctx.font = "bold 11px Georgia"; ctx.textAlign = "center";
-  ctx.fillText(ship.clan ? "["+ship.clan+"] "+ship.name : ship.name, 0, -28);
-  ctx.restore();
+function drawHealthBar(x, y, health) {
+  ctx.fillStyle = "#333";
+  ctx.fillRect(x - 20, y - 38, 40, 5);
+  ctx.fillStyle = health > 50 ? "#2ecc71" : "#e74c3c";
+  ctx.fillRect(x - 20, y - 38, 40 * (health/100), 5);
+}
 
+function drawShip() {
+  // Draw other players
   Object.values(otherPlayers).forEach(p => {
     ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.angle);
     ctx.fillStyle = "#c0392b"; ctx.beginPath(); ctx.moveTo(22,0); ctx.lineTo(-15,-10); ctx.lineTo(-20,0); ctx.lineTo(-15,10); ctx.closePath(); ctx.fill();
@@ -144,6 +172,27 @@ function drawShip() {
     ctx.rotate(-p.angle); ctx.fillStyle = "#fff"; ctx.font = "bold 11px Georgia"; ctx.textAlign = "center";
     ctx.fillText(p.name || "Pirate", 0, -28);
     ctx.restore();
+    drawHealthBar(p.x, p.y, p.health || 100);
+  });
+
+  // Draw your ship
+  ctx.save(); ctx.translate(ship.x, ship.y); ctx.rotate(ship.angle);
+  ctx.fillStyle = "#8B4513"; ctx.beginPath(); ctx.moveTo(22,0); ctx.lineTo(-15,-10); ctx.lineTo(-20,0); ctx.lineTo(-15,10); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#A0522D"; ctx.beginPath(); ctx.ellipse(0,0,14,8,0,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle = "#5C3010"; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(0,-8); ctx.lineTo(0,8); ctx.stroke();
+  ctx.fillStyle = "#F5F0E0"; ctx.beginPath(); ctx.moveTo(0,-8); ctx.quadraticCurveTo(14+Math.sin(t)*2,0,0,8); ctx.quadraticCurveTo(-3,0,0,-8); ctx.fill();
+  ctx.rotate(-ship.angle); ctx.fillStyle = "#fff"; ctx.font = "bold 11px Georgia"; ctx.textAlign = "center";
+  ctx.fillText(ship.clan ? "["+ship.clan+"] "+ship.name : ship.name, 0, -28);
+  ctx.restore();
+  drawHealthBar(ship.x, ship.y, ship.health);
+}
+
+function drawCannonballs() {
+  cannonballs.forEach(ball => {
+    ctx.fillStyle = "#1a1a1a";
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, 5, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#444";
+    ctx.beginPath(); ctx.arc(ball.x - 1, ball.y - 1, 2, 0, Math.PI*2); ctx.fill();
   });
 }
 
@@ -155,7 +204,6 @@ function drawMinimap() {
   islands.forEach(isl => {
     const ix = mx+(isl.x/800)*mw, iy = my+(isl.y/500)*mh;
     ctx.fillStyle = isl.color; ctx.beginPath(); ctx.arc(ix, iy, 5, 0, Math.PI*2); ctx.fill();
-    ctx.fillStyle = "#fff"; ctx.font = "8px Georgia"; ctx.textAlign = "center"; ctx.fillText(isl.name, ix, iy+13);
   });
   const px = mx+(ship.x/800)*mw, py = my+(ship.y/500)*mh;
   ctx.fillStyle = "#ff4444"; ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI*2); ctx.fill();
@@ -181,26 +229,38 @@ function drawTradeMenu() {
 function drawHUD() {
   ctx.fillStyle = "rgba(0,0,0,0.55)"; ctx.beginPath(); ctx.roundRect(10, 10, 200, 36, 8); ctx.fill();
   ctx.fillStyle = "#FFE47A"; ctx.font = "bold 13px Georgia"; ctx.textAlign = "left"; ctx.fillText("ARGH.IO  |  Gold: "+ship.gold+"g", 20, 33);
-  ctx.fillStyle = ship.clan ? "#1a6b1a" : "rgba(0,0,0,0.5)"; ctx.beginPath(); ctx.roundRect(10, 54, 110, 24, 6); ctx.fill();
-  ctx.fillStyle = "#fff"; ctx.font = "11px Georgia"; ctx.textAlign = "center"; ctx.fillText(ship.clan ? "Clan: "+ship.clan : "[ + Join Clan ]", 65, 70);
+
+  // Health bar
+  ctx.fillStyle = "rgba(0,0,0,0.55)"; ctx.beginPath(); ctx.roundRect(10, 54, 150, 20, 6); ctx.fill();
+  ctx.fillStyle = ship.health > 50 ? "#2ecc71" : "#e74c3c";
+  ctx.beginPath(); ctx.roundRect(10, 54, 150*(ship.health/100), 20, 6); ctx.fill();
+  ctx.fillStyle = "#fff"; ctx.font = "bold 11px Georgia"; ctx.textAlign = "center";
+  ctx.fillText("HP: "+ship.health, 85, 68);
+
+  ctx.fillStyle = ship.clan ? "#1a6b1a" : "rgba(0,0,0,0.5)"; ctx.beginPath(); ctx.roundRect(10, 80, 110, 24, 6); ctx.fill();
+  ctx.fillStyle = "#fff"; ctx.font = "11px Georgia"; ctx.textAlign = "center"; ctx.fillText(ship.clan ? "Clan: "+ship.clan : "[ + Join Clan ]", 65, 96);
+
   if (showClanInput) {
     ctx.fillStyle = "rgba(0,0,0,0.8)"; ctx.beginPath(); ctx.roundRect(250, 220, 300, 60, 10); ctx.fill();
     ctx.strokeStyle = "#FFE47A"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.roundRect(250, 220, 300, 60, 10); ctx.stroke();
     ctx.fillStyle = "#FFE47A"; ctx.font = "bold 13px Georgia"; ctx.textAlign = "center"; ctx.fillText("Enter clan name:", 400, 242);
     ctx.fillStyle = "#fff"; ctx.font = "15px Georgia"; ctx.fillText(clanInput+"|", 400, 266);
   }
+
   if (messageTimer > 0) {
     ctx.globalAlpha = Math.min(1, messageTimer/30);
     ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.beginPath(); ctx.roundRect(200, 440, 400, 32, 8); ctx.fill();
     ctx.fillStyle = "#FFE47A"; ctx.font = "13px Georgia"; ctx.textAlign = "center"; ctx.fillText(message, 400, 461);
     ctx.globalAlpha = 1;
   }
-  ctx.fillStyle = "rgba(0,0,0,0.4)"; ctx.beginPath(); ctx.roundRect(10, 460, 230, 28, 6); ctx.fill();
-  ctx.fillStyle = "#fff"; ctx.font = "11px Georgia"; ctx.textAlign = "left"; ctx.fillText("WASD to sail  |  E to trade", 20, 478);
+
+  ctx.fillStyle = "rgba(0,0,0,0.4)"; ctx.beginPath(); ctx.roundRect(10, 460, 280, 28, 6); ctx.fill();
+  ctx.fillStyle = "#fff"; ctx.font = "11px Georgia"; ctx.textAlign = "left";
+  ctx.fillText("WASD to sail  |  E to trade  |  Click to shoot", 20, 478);
 }
 
 function loop() {
-  update(); drawOcean(); drawIslands(); drawShip(); drawMinimap(); drawTradeMenu(); drawHUD();
+  update(); drawOcean(); drawIslands(); drawShip(); drawCannonballs(); drawMinimap(); drawTradeMenu(); drawHUD();
   requestAnimationFrame(loop);
 }
 
